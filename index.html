@@ -1534,30 +1534,62 @@
       const audio = document.getElementById('alarm-sound');
       if (!audio) return;
 
-      audio.muted = true;
-      audio.play().then(() => {
+      // This function is called directly from the user's tap on "開始".
+      // Start the same audio element once during the user gesture, then stop it.
+      // volume=0 avoids an audible test sound while still using the user's gesture.
+      const previousVolume = audio.volume;
+      const previousMuted = audio.muted;
+      audio.volume = 0;
+      audio.muted = false;
+
+      const p = audio.play();
+      if (p && typeof p.then === 'function') {
+        p.then(() => {
+          audio.pause();
+          audio.currentTime = 0;
+          audio.volume = previousVolume;
+          audio.muted = previousMuted;
+          console.log("Audio unlocked");
+        }).catch(e => {
+          audio.volume = previousVolume;
+          audio.muted = previousMuted;
+          console.log("Audio unlock failed:", e);
+        });
+      } else {
         audio.pause();
         audio.currentTime = 0;
-        audio.muted = false;
-        console.log("Audio unlocked");
-      }).catch(e => {
-        audio.muted = false;
-        console.log("Audio unlock failed:", e);
-      });
+        audio.volume = previousVolume;
+        audio.muted = previousMuted;
+      }
     }
 
     function playAlarmSound() {
       const audio = document.getElementById('alarm-sound');
-      if (audio) {
-        audio.currentTime = 0;
-        audio.play().catch(e => console.log("Audio play blocked or missing:", e));
-        
-        if (alarmTimeout) clearTimeout(alarmTimeout);
-        alarmTimeout = setTimeout(() => {
-          audio.pause();
-          audio.currentTime = 0;
-        }, 5000);
+      if (!audio) return;
+
+      // Do not mute/pause/reset the audio anywhere during an automatic
+      // Pomodoro transition. Only this function controls the alarm playback.
+      audio.muted = false;
+      audio.volume = 1;
+      audio.currentTime = 0;
+
+      if (alarmTimeout) {
+        clearTimeout(alarmTimeout);
+        alarmTimeout = null;
       }
+
+      const playPromise = audio.play();
+      if (playPromise && typeof playPromise.catch === 'function') {
+        playPromise.catch(e => {
+          console.log("Audio play blocked or missing:", e);
+        });
+      }
+
+      alarmTimeout = setTimeout(() => {
+        audio.pause();
+        audio.currentTime = 0;
+        alarmTimeout = null;
+      }, 5000);
     }
 
     function updateSaveButtonState() {
@@ -1573,10 +1605,10 @@
       }
     }
 
-    function startTimer() {
-      unlockAudio();
+    function startTimer(fromUser = true) {
+      if (fromUser) unlockAudio();
       if (isTimerRunning) return;
-      
+
       if (timerMode === 'alarm') {
         updateAlarmTimerTarget();
         if (timerSeconds <= 0) {
@@ -1609,12 +1641,14 @@
           } else {
             if (timerSeconds > 0) timerSeconds--;
           }
-          
+
           if (currentSubId !== 'break') {
             subjectElapsedSeconds[currentSubId] = (subjectElapsedSeconds[currentSubId] || 0) + 1;
           }
 
           if (timerSeconds <= 0) {
+            timerSeconds = 0;
+            updateTimerDisplay();
             playAlarmSound();
             pauseTimer();
             showToast('アラーム時刻になりました！自動で記録を保存します');
@@ -1622,39 +1656,63 @@
             return;
           }
         } else {
+          // Pomodoro
           if (timerSeconds > 0) {
             timerSeconds--;
             if (loopState === 'work' && currentSubId !== 'break') {
               subjectElapsedSeconds[currentSubId] = (subjectElapsedSeconds[currentSubId] || 0) + 1;
             }
           }
-          if (timerSeconds === 0) {
+
+          if (timerSeconds <= 0) {
+            // Make the completed phase explicitly reach 00:00:00 before switching.
+            timerSeconds = 0;
+            updateTimerDisplay();
+            renderLapList();
+            updateSaveButtonState();
+
             playAlarmSound();
+
+            // Stop the current interval before starting the next Pomodoro phase.
+            isTimerRunning = false;
+            clearInterval(timerInterval);
+            timerInterval = null;
+
             if (loopState === 'work') {
               saveTimerSessionAuto(false);
+
               if (pomoBreakMin > 0) {
                 loopState = 'break';
                 timerSeconds = pomoBreakMin * 60;
                 document.getElementById('timer-loop-status').innerText = `☕ 休憩タイム (${currentSet} / ${totalSets}セット)`;
                 showToast('集中タイム終了！休憩に入ります。');
-                startTimer();
+
+                // Start automatically; do NOT run audio unlock again.
+                startTimer(false);
                 return;
               }
             }
+
             if (currentSet < totalSets) {
               currentSet++;
               loopState = 'work';
               timerSeconds = pomoWorkMin * 60;
               document.getElementById('timer-loop-status').innerText = `🔥 集中タイム (${currentSet} / ${totalSets}セット)`;
               showToast(`セット ${currentSet} を開始します！`);
-              startTimer();
+
+              // Start automatically; do NOT run audio unlock again.
+              startTimer(false);
             } else {
+              // Final Pomodoro phase: leave the timer at 00:00:00.
               pauseTimer();
+              timerSeconds = 0;
+              updateTimerDisplay();
               showToast('すべてのセットが完了しました！お疲れ様でした！');
             }
             return;
           }
         }
+
         updateTimerDisplay();
         renderLapList();
         updateSaveButtonState();
@@ -1662,9 +1720,11 @@
     }
 
     function pauseTimer() {
-      if (!isTimerRunning) return;
+      if (timerInterval) {
+        clearInterval(timerInterval);
+        timerInterval = null;
+      }
       isTimerRunning = false;
-      clearInterval(timerInterval);
 
       document.getElementById('start-btn').classList.remove('hidden');
       document.getElementById('pause-btn').classList.add('hidden');
@@ -3372,5 +3432,14 @@
       }, 3000);
     }
   </script>
+<script>
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("./sw.js").catch(error => {
+      console.log("Service Worker registration failed:", error);
+    });
+  });
+}
+</script>
 </body>
 </html>
